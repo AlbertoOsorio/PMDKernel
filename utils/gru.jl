@@ -1,73 +1,84 @@
-using GLMakie
+using GLMakie, Printf
 
-function Slicer3D(fig, data;
-                  colormap = :inferno,
-                  colorrange = nothing,
-                  zoom::Real = 1,
-                  haircross = true,
-                  pointvalue = true)
+function Slicer3D(fig,data;
+                        colormap=:viridis,colorrange=nothing,
+                        zoom::Int=1,
+                        haircross=true,pointvalue=true)
 
-    sizesag, sizecor, sizeaxi = size(data)
-    startpoint = Point3(round.(Int, size(data) ./ 2))
+    debug = true
 
-    crange = isnothing(colorrange) ? extrema(filter(!isnan, data)) : colorrange
+    # Layout:
+    # Data has dimensions B[x,y,z] x: R->L y: P->A z: F->H
+    # --------------------------------
+    # |    empty   | y  axial  |     |
+    # |            |      x    |sl y |
+    # |------------------------|-----|
+    # | z sagittal | z coronal |     |
+    # |      y     |     x     |sl z |
+    # --------------------------------
+    # |            |   sl x    |     |
+    # --------------------------------
 
-    # --- Create a grid in the figure ---
-    grid = fig[1, 1] = GridLayout()
-
-    # --- Place axes (this creates rows/cols) ---
-    aaxi = Axis(grid[1, 2], title = "Axial", aspect = DataAspect())
-    asag = Axis(grid[2, 1], title = "Sagittal", aspect = DataAspect())
-    acor = Axis(grid[2, 2], title = "Coronal", aspect = DataAspect())
-
-    for ax in (aaxi, asag, acor)
-        hidespines!(ax); hidedecorations!(ax)
+    # Obtain parameters from data
+    sizesag,sizecor,sizeaxi = size(data)
+    zsizesag,zsizecor,zsizeaxi = zoom.*size(data)
+    startpoint = Point3(Int.(round.(size(data)./2)))
+    if isnothing(colorrange) # Problem with NaN
+        crange = extrema(filter(!isnan,data))
+        # (minimum(data),maximum(data))
+        # if isnan(crange[1])||isnan(crange[2])
+        #     println("NaN in data, range set to (-1,1)")
+        #     crange = (-1,1)
+        # end
+    else
+        crange = colorrange
+    end
+    if debug
+        println("size(data) = $(size(data))")
+        println("crange = $crange")
     end
 
-    # --- Place sliders and label (also create rows/cols) ---
-    saxi = Slider(grid[1, 3], range = 1:sizeaxi, startvalue = startpoint[3]) # axial slider (right)
-    scor = Slider(grid[2, 3], range = 1:sizecor, startvalue = startpoint[2]) # coronal slider (right)
-    ssag = Slider(grid[3, 2], range = 1:sizesag, startvalue = startpoint[1]) # sagittal slider (bottom)
-    lpvalue = Label(grid[3, 1], "", tellwidth = false, tellheight = false, halign = :left)
+    # Create panels and sliders
+        # fig = Figure(size=(650,500)) # Need to control the size
+        aaxi = Axis(fig[1,2],aspect=DataAspect(),height=zsizecor,width=zsizesag)
+        asag = Axis(fig[2,1],aspect=DataAspect(),height=zsizeaxi,width=zsizecor)
+        acor = Axis(fig[2,2],aspect=DataAspect(),height=zsizeaxi,width=zsizesag)
+        hidespines!(aaxi); hidedecorations!(aaxi)
+        hidespines!(acor); hidedecorations!(acor)
+        hidespines!(asag); hidedecorations!(asag)
+        lpvalue = Label(fig[3,1],"")
+        # Need to get rid of label (or position it in a better way)
+        saxi = SliderGrid(fig[2,3],
+                    (range=1:sizeaxi,startvalue=startpoint[3],horizontal=false,height=zsizeaxi))
+        ssag = SliderGrid(fig[3,2],
+                (range=1:sizesag,startvalue=startpoint[1],horizontal=true,width=zsizesag))
+        scor = SliderGrid(fig[1,3],
+            (range=1:sizecor,startvalue=startpoint[2],horizontal=false,height=zsizecor))
 
-    # --- Now safe to set relative sizes (rows/cols exist now) ---
-    rowsize!(grid, 1, Relative(0.45))  # top row (axial)
-    rowsize!(grid, 2, Relative(0.45))  # middle row (sagittal + coronal)
-    rowsize!(grid, 3, Relative(0.10))  # bottom row (sliders/label)
-
-    colsize!(grid, 1, Relative(0.45))
-    colsize!(grid, 2, Relative(0.45))
-    colsize!(grid, 3, Relative(0.10))
-
-    # --- Initial render ---
-    heatmap!(aaxi, data[:, :, startpoint[3]], colormap = colormap, colorrange = crange)
-    heatmap!(asag, data[startpoint[1], :, :]', colormap = colormap, colorrange = crange)
-    heatmap!(acor, data[:, startpoint[2], :]', colormap = colormap, colorrange = crange)
-
-    # --- Reactivity: update all three when any slider changes ---
-    lift(ssag.value, scor.value, saxi.value) do x, y, z
-        empty!(aaxi); empty!(asag); empty!(acor)
-
-        heatmap!(aaxi, data[:, :, z], colormap = colormap, colorrange = crange)
-        heatmap!(asag, data[x, :, :]', colormap = colormap, colorrange = crange)
-        heatmap!(acor, data[:, y, :]', colormap = colormap, colorrange = crange)
-
+    # The interactive part
+    @lift begin
+        x = $(ssag.sliders[1].value)
+        y = $(scor.sliders[1].value)
+        z = $(saxi.sliders[1].value)
+        heatmap!(asag,data[x,:,:],colormap=colormap,colorrange=crange)
+        heatmap!(acor,data[:,y,:],colormap=colormap,colorrange=crange)
+        heatmap!(aaxi,data[:,:,z],colormap=colormap,colorrange=crange)
         if haircross
-            lines!(aaxi, [1, sizesag], [y, y], color = :white)
-            lines!(aaxi, [x, x], [1, sizecor], color = :white)
-
-            lines!(acor, [1, sizesag], [z, z], color = :white)
-            lines!(acor, [x, x], [1, sizeaxi], color = :white)
-
-            lines!(asag, [1, sizecor], [z, z], color = :white)
-            lines!(asag, [y, y], [1, sizeaxi], color = :white)
+            lines!(aaxi,[1;sizesag],[y;y],color=:white)
+            lines!(aaxi,[x;x],[1;sizecor],color=:white)
+            lines!(acor,[1;sizesag],[z;z],color=:white)
+            lines!(acor,[x;x],[1;sizeaxi],color=:white)
+            lines!(asag,[1;sizecor],[z;z],color=:white)
+            lines!(asag,[y;y],[1;sizeaxi],color=:white)
         end
-
         if pointvalue
-            val = data[x, y, z]
-            lpvalue.text = isfinite(val) ? @sprintf("(%d, %d, %d) → %.3e", x, y, z, val) : "NaN"
+            lpvalue.text = @sprintf("(%d,%d,%d) -> %.4f",
+                                    x,y,z,data[x,y,z])
         end
     end
 
-    return (aaxi, asag, acor, saxi, ssag, scor)
+    return saxi # returns the upper left grid to be used by the user
+
+    # display(fig)
+
 end

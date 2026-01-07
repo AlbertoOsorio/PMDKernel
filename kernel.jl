@@ -1,66 +1,83 @@
 using CUDA
 using LinearAlgebra
 
-const T = Float32 # Tune based on GPU shared memory
-const μ0 = 4π * 1f-7  # Magnetic constant
-
-function kernel_fused_B!(R, P, M, B, n, m)  # Added P parameter
+function kernel_fused_B!(R, P, M, B, n, m)
     i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    i > n && return
-
-    # Register accumulators (remain unchanged)
-    Bx, By, Bz = zero(T), zero(T), zero(T)
     
-    # Shared memory for BOTH moments and positions (6 × BATCH_M)
-    # Layout: first 3 rows = moments, next 3 rows = positions
-    shmem = CuStaticSharedArray(T, (6, BATCH_M))
-    Msh = view(shmem, 1:3, :)
-    Psh = view(shmem, 4:6, :)
-
-    # Load evaluation point once into registers
-    Rx, Ry, Rz = R[i, 1], R[i, 2], R[i, 3]
+    # Register accumulators for the result
+    Bx, By, Bz = 0.0f0, 0.0f0, 0.0f0
+    
+    # Definimos shared memory
+    shmem = CuStaticSharedArray(Float32, (6, BATCH_M))
+    
+    Rx, Ry, Rz = 0.0f0, 0.0f0, 0.0f0
+    if i <= n
+        Rx = R[i, 1]
+        Ry = R[i, 2]
+        Rz = R[i, 3]
+    end
 
     jb = 1
     while jb <= m
         batch_size = min(BATCH_M, m - jb + 1)
         
-        # Collaborative load: threads 1-6 load moments & positions
-        if threadIdx().x <= 6
-            @inbounds for k in 1:batch_size
-                shmem[threadIdx().x, k] = (threadIdx().x <= 3) ? 
-                    M[threadIdx().x, jb + k - 1] : 
-                    P[threadIdx().x - 3, jb + k - 1]
-            end
-        end
-        sync_threads()
+        # Cargamos la batch de dipolos al espacio reservado de shared memory
+        total_elements = 6 * batch_size
+        tid = threadIdx().x
+        while tid <= total_elements
 
-        # Process each dipole in the batch
-        @inbounds for k in 1:batch_size
-            # Dipole moment
-            μx, μy, μz = Msh[1, k], Msh[2, k], Msh[3, k]
+            col = (tid - 1) ÷ 6 + 1
+            row = (tid - 1) % 6 + 1
             
-            # RELATIVE VECTOR: r = R_eval - P_dipole
-            dx = Rx - Psh[1, k]
-            dy = Ry - Psh[2, k]
-            dz = Rz - Psh[3, k]
+            global_col = jb + col - 1
             
-            # Field calculation using relative vector
-            y = dx*μx + dy*μy + dz*μz
-            r2 = dx^2 + dy^2 + dz^2
-            r = sqrt(r2)
-            inv_r3 = 1f0 / (r2 * r)
-            inv_r5 = inv_r3 / r2
-            scale = μ0 / (4π)
-            
-            Bx += scale * (3f0 * y * dx * inv_r5 - μx * inv_r3)
-            By += scale * (3f0 * y * dy * inv_r5 - μy * inv_r3)
-            Bz += scale * (3f0 * y * dz * inv_r5 - μz * inv_r3)
+            if row <= 3
+                shmem[row, col] = M[row, global_col]
+            else
+                shmem[row, col] = P[row - 3, global_col]
+            end
+            tid += blockDim().x 
         end
         
+        # Aseguramos que todos los datos finalizaron de ser cargados a shmem antes de comenzar los calculos
+        sync_threads()
+
+        
+        if i <= n
+            for k in 1:batch_size
+
+                μx, μy, μz = shmem[1, k], shmem[2, k], shmem[3, k]
+                px, py, pz = shmem[4, k], shmem[5, k], shmem[6, k]
+                
+                dx = Rx - px
+                dy = Ry - py
+                dz = Rz - pz
+                
+                r2 = dx*dx + dy*dy + dz*dz
+                r = sqrt(r2)
+                
+                # Protect against r=0
+                if r > 1.0f-9 
+                    inv_r3 = 1.0f0 / (r2 * r)
+                    inv_r5 = inv_r3 / r2
+                    dot_mr = dx*μx + dy*μy + dz*μz
+    
+                    scale = 1.0f-7 # μ0 / 4π
+    
+                    Bx += scale * (3.0f0 * dot_mr * dx * inv_r5 - μx * inv_r3)
+                    By += scale * (3.0f0 * dot_mr * dy * inv_r5 - μy * inv_r3)
+                    Bz += scale * (3.0f0 * dot_mr * dz * inv_r5 - μz * inv_r3)
+                end
+            end
+        end
+        
+        # Aseguramos que todos los threads terminen antes de la siguiente batch
         sync_threads()
         jb += BATCH_M
     end
 
-    @inbounds B[i, 1], B[i, 2], B[i, 3] = Bx, By, Bz
+    if i <= n
+        B[i, 1], B[i, 2], B[i, 3] = Bx, By, Bz
+    end
     return
 end
