@@ -14,7 +14,7 @@ function B0(viz::Bool, threads = 256)
 
     data = npzread("data/B0.npz")
     M1_cpu = hcat(data["array1"], data["array3"])
-    M2_cpu = hcat(data["array2"] .* 2.035, data["array4"] .* 3.051)
+    M2_cpu = hcat(data["array2"] .* 2.035, data["array4"] .* 8.48)
 
     n = size(R_cpu, 1)
     m = size(M2_cpu, 2)
@@ -30,19 +30,20 @@ function B0(viz::Bool, threads = 256)
     shmem = 6 * BATCH_M * sizeof(Float32) 
 
     if viz
-        @cuda threads=threads blocks=blocks shmem=shmem kernel_fused_B!(R, P, M, B, n, m)
+        @cuda threads=threads blocks=blocks _Bnu!(R, P, M, B, n, m)
+        println(true)
         B_res = Array(B')
 
         XX = [xi for xi in gx, yi in gy, zi in gz]
         mask = trues(size(XX))
         By = zeros(size(XX))
         @allowscalar begin
-            By[mask] = B_res[2,:] .* -1000 # mT, el menos es unicamente para invertir los colores del heatmap
+            By[mask] = B_res[2,:]# mT, el menos es unicamente para invertir los colores del heatmap
             fig = Figure(size=(600,600))
             saxi = Slicer3D(fig,By,zoom=3)  
             display(fig)
         end
     else
-        benchmark_kernel(R, P, M, B, n, m, threads)
+        @cuda threads=threads blocks=blocks _Bnu!(R, P, M, B, n, m)
     end
 end
